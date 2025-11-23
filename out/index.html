@@ -7,6 +7,14 @@
     <script src="main.js"></script>
 </head>
 <body>
-    <script>var app = Elm.Main.init();</script>
+    <script>
+		let app = Elm.Main.init();
+		app.ports.saveModel.subscribe(function (message) {
+			localStorage.setItem(message[0], message[1]);
+		})
+		app.ports.loadModelReq.subscribe(function (message) {
+			app.ports.loadModelSub.send(localStorage.getItem(message))
+		})
+	</script>
 </body>
 </html>

@@ -1,13 +1,15 @@
-module Main exposing (..)
+port module Main exposing (..)
 
 import Browser
 import Http
 import Html exposing (Html, button, div, text, ul, li, input, p)
 import Html.Attributes exposing (draggable, dropzone, value, placeholder, class)
-import Html.Events exposing (on, preventDefaultOn, onInput)
+import Html.Events exposing (on, preventDefaultOn, onInput, onClick)
 import Dict exposing (Dict)
 import Json.Decode as Json
-import Json.Decode exposing (at, string, map3, list)
+import Json.Encode as Encode
+import Json.Decode as Decode
+import Json.Decode exposing (at, map3)
 import Maybe exposing (Maybe, andThen, withDefault)
 import Text.Search as Search
 
@@ -17,8 +19,20 @@ main =
 -- Model and init
 
 type alias Semester = String
+
+-- simplified.json format:
+type alias Class =
+    { subject : String
+    , courseNumber : String
+    , title : String
+--    , distReqs : String      -- TODO add back once data is preprocessed
+--    , prereqs : String
+--    , coreqs : String
+    }
+
 type alias IndependentClass =
     { class : Class, semester : Semester }
+
 type alias ClassList = Dict Semester (List Class)
 type ClassRosterResult
     = Roster (List Class)
@@ -30,23 +44,32 @@ type alias Model =
     , searchText : String
     , classRoster : ClassRosterResult }
 
--- omnibus.json format:
-type alias Class =       -- TODO: should be replaced by class for most cases
-    { subject : String
-    , courseNumber : String
-    , title : String
---    , distReqs : String      -- TODO add back once data is preprocessed
---    , prereqs : String
---    , coreqs : String
-    }
+classToJson : Class -> Encode.Value
+classToJson class =
+    Encode.object
+        [ ( "subject", Encode.string class.subject )
+        , ( "catalogNbr", Encode.string class.courseNumber )
+        , ( "titleLong", Encode.string class.title ) ]
+
+modelToJsonString : Model -> String
+modelToJsonString =
+    .classes >> (Encode.dict identity <| Encode.list classToJson) >> Encode.encode 0
+
+classesRecord : Json.Decoder ClassList
+classesRecord = Decode.dict classRecord
+-- Kinda stupid naming going on here: record is JSON -> Elm object
+
+port saveModel : (String, String) -> Cmd msg
+port loadModelReq : String -> Cmd msg
+port loadModelSub : ((Maybe String) -> msg) -> Sub msg
 
 classRecord : Json.Decoder (List Class)
 classRecord =
-    list
+    Decode.list
         <| map3 Class
-            (at ["subject"] string)
-            (at ["catalogNbr"] string)
-            (at ["titleLong"] string)
+            (at ["subject"] Decode.string)
+            (at ["catalogNbr"] Decode.string)
+            (at ["titleLong"] Decode.string)
 
 toSearchString : Class -> String
 toSearchString record = record.subject ++ record.courseNumber ++ ": " ++ record.title
@@ -62,8 +85,10 @@ init flags =
         Nothing
         ""
         Loading
-    , Http.get
-        { url = "/data/simplified.json", expect = Http.expectJson LoadedClasses classRecord })
+    , Cmd.batch
+        [ Http.get
+            { url = "/data/simplified.json", expect = Http.expectJson LoadedClasses classRecord }
+        , loadModelReq "plan1" ] )
 
 -- Updating
 
@@ -74,13 +99,18 @@ type Msg
     | MultiMsg (List Msg)
     | LoadedClasses (Result Http.Error (List Class))
     | NewSearch String
+    | SaveModel String
+    | LoadModel String
     | DoNothing
 
-updateModel : Msg -> Model -> Model
-updateModel msg model =
+noCmd : Model -> (Model, Cmd Msg)
+noCmd model = (model, Cmd.none)
+
+update : Msg -> Model -> (Model, Cmd Msg)
+update msg model =
     case msg of
         AddClass class semester ->
-            { model | classes =
+            noCmd { model | classes =
                 (Dict.insert
                     semester
                     (List.append (withDefault [] (Dict.get semester model.classes)) [class])
@@ -88,23 +118,30 @@ updateModel msg model =
         DelClass class semester ->
             case (Dict.get semester model.classes) of
                 Just semesterList ->
-                    { model | classes =
+                    noCmd { model | classes =
                         (Dict.insert semester (List.filter (\c -> c /= class) semesterList) model.classes) }
-                Nothing -> model    -- This is where classes from the roster would end up
+                Nothing -> noCmd model    -- This is where classes from the roster would end up
         MultiMsg list ->
-            List.foldl updateModel model list
+            -- This should probably provide the Cmd of the last Msg in the list
+            noCmd <| List.foldl (\msg_ model_ -> Tuple.first <| update msg_ model_) model list
         StartDrag class semester ->
-            { model | selectedClass = Just (IndependentClass class semester) }
+            noCmd { model | selectedClass = Just (IndependentClass class semester) }
         LoadedClasses (Ok roster) ->
-            { model | classRoster = Roster roster }
+            noCmd { model | classRoster = Roster roster }
         LoadedClasses (Err error) ->
-            { model | classRoster = Error error }
+            noCmd { model | classRoster = Error error }
         NewSearch str ->
-            { model | searchText = str }
-        DoNothing -> model
-
-update : Msg -> Model -> (Model, Cmd Msg)
-update msg model = (updateModel msg model, Cmd.none)
+            noCmd { model | searchText = str }
+        SaveModel key ->
+            ( model, saveModel (key, modelToJsonString model) )
+        LoadModel json ->
+            case (Decode.decodeString classesRecord json) of
+                Ok classList ->
+                    noCmd { model | classes = classList }
+                Err err ->
+                    noCmd model
+        DoNothing ->
+            noCmd model
 
 -- View
 
@@ -174,9 +211,9 @@ classRosterHtml model =
 toolbar : Html Msg
 toolbar =
     div [ class "toolbar" ]
-        [ div [ class "toolbar-item" ] [ text "Dashboard" ]
-        , div [ class "toolbar-item" ] [ text "Plans" ]
-        , div [ class "toolbar-item" ] [ text "Settings" ] ]
+        [ div [ class "toolbar-item" ] [ text "Edit Semesters" ]
+        , div [ class "toolbar-item" ] [ text "Edit Requirements" ]
+        , div [ class "toolbar-item", onClick <| SaveModel "plan1" ] [ text "Save" ] ]
 
 view : Model -> Browser.Document Msg
 view model =
@@ -197,4 +234,5 @@ view model =
 -- Subscriptions
 
 subscriptions : Model -> Sub Msg
-subscriptions model = Sub.none
+subscriptions model =
+    loadModelSub <| withDefault DoNothing << Maybe.map LoadModel    -- jesus idk wtf functional programming is
